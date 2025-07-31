@@ -5,6 +5,8 @@ import time
 import random
 import asyncio
 import threading
+import signal
+import atexit
 from scapy.all import *
 from simple_term_menu import TerminalMenu
 from rich.console import Console
@@ -23,6 +25,27 @@ BANNER = r"""
 
 console = Console()
 original_interface_mode = {}
+selected_interface = None
+
+# Cleanup handler for exit or Ctrl+C
+def cleanup():
+    if selected_interface:
+        console.print(f"\n[cyan]Restoring {selected_interface} to managed mode...[/cyan]")
+        try:
+            set_managed_mode(selected_interface)
+        except Exception as e:
+            console.print(f"[red]Failed to restore interface: {e}[/red]")
+
+# Register cleanup on exit
+atexit.register(cleanup)
+
+# Handle Ctrl+C
+def signal_handler(sig, frame):
+    console.print("\n[red]Script interrupted. Cleaning up...[/red]")
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 def get_wifi_interfaces():
     output = os.popen("iw dev | grep Interface").read().splitlines()
@@ -115,6 +138,7 @@ async def start_attack(target, interface, wordlist):
     console.print("\n[red]Password not found in the list.[/red]")
 
 async def main():
+    global selected_interface
     await print_banner()
 
     interfaces = get_wifi_interfaces()
@@ -124,14 +148,14 @@ async def main():
 
     terminal_menu = TerminalMenu(interfaces, title="Select your Wi-Fi interface:")
     index = terminal_menu.show()
-    interface = interfaces[index]
+    selected_interface = interfaces[index]
 
     # Automatically switch to monitor mode
-    console.print(f"[yellow]Enabling monitor mode on {interface}...[/yellow]")
-    set_monitor_mode(interface)
+    console.print(f"[yellow]Enabling monitor mode on {selected_interface}...[/yellow]")
+    set_monitor_mode(selected_interface)
 
     try:
-        networks = await async_scan_networks(interface, scan_time=20)
+        networks = await async_scan_networks(selected_interface, scan_time=20)
         if not networks:
             return
 
@@ -148,17 +172,14 @@ async def main():
         else:
             wordlist_path = console.input("\nEnter full path to custom wordlist: ")
 
-        await start_attack(target, interface, wordlist_path)
+        await start_attack(target, selected_interface, wordlist_path)
 
     finally:
-        # Always return to managed mode
-        console.print(f"\n[cyan]Restoring interface {interface} to managed mode...[/cyan]")
-        set_managed_mode(interface)
+        cleanup()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        console.print("\n[red]Interrupted. Restoring interfaces...[/red]")
-        for iface in get_wifi_interfaces():
-            set_managed_mode(iface)
+        cleanup()
+        sys.exit(0)
