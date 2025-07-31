@@ -10,7 +10,7 @@ for package in required:
     except ImportError:
         subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
-# === Now import required modules ===
+# === Imports ===
 import os
 import time
 import random
@@ -21,7 +21,10 @@ import atexit
 from scapy.all import *
 from simple_term_menu import TerminalMenu
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
+
+console = Console()
+selected_interface = None
 
 # === Banner ===
 BANNER = r"""
@@ -34,9 +37,6 @@ BANNER = r"""
 . #######:::::. ######:: ##:::: ##: ##:::: ##: ########: ########: ##:::. ##:
 :.......:::::::......:::..:::::..::..:::::..::........::........::..:::::..::
 """
-
-console = Console()
-selected_interface = None
 
 # === Cleanup ===
 def cleanup():
@@ -56,7 +56,7 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
-# === Network Setup ===
+# === Wi-Fi mode management ===
 def is_interface_up(interface):
     try:
         state = open(f"/sys/class/net/{interface}/operstate").read().strip()
@@ -116,7 +116,7 @@ def channel_hopper(interface, stop_event):
         os.system(f"iw dev {interface} set channel {channel}")
         time.sleep(0.5)
 
-# === Wi-Fi Scanner ===
+# === Scan networks ===
 async def print_banner():
     console.clear()
     console.print(f"[cyan]{BANNER}[/cyan]")
@@ -153,10 +153,10 @@ async def async_scan_networks(interface, scan_time=15):
 
     return [{"ssid": ssid, "bssid": bssid} for bssid, ssid in networks.items()]
 
-# === WPA Cracking Sim with custom retry ===
+# === Crack WPA with progress ===
 async def start_attack(target, interface, wordlist):
     while True:
-        console.print(f"\n[bold green]Attacking:[/bold green] {target['ssid']} | {target['bssid']}")
+        console.print(f"\n[bold green]Target:[/bold green] {target['ssid']} | {target['bssid']}")
         console.print(f"[yellow]Using wordlist:[/yellow] {wordlist}")
 
         console.print("\n[bold blue]Capturing handshake...[/bold blue]")
@@ -170,12 +170,22 @@ async def start_attack(target, interface, wordlist):
             console.print(f"[red]Wordlist not found: {wordlist}[/red]")
             return
 
+        total = len(passwords)
         found = False
-        with Progress(SpinnerColumn(), BarColumn(), TextColumn("{task.description}")) as progress:
-            task = progress.add_task("Cracking password...", total=len(passwords))
+
+        with Progress(
+            SpinnerColumn(),
+            BarColumn(),
+            "[progress.percentage]{task.percentage:>3.0f}%",
+            TextColumn("{task.completed}/{task.total} tried"),
+            TimeRemainingColumn(),
+            TextColumn(" | {task.description}")
+        ) as progress:
+            task = progress.add_task("Cracking password...", total=total)
+
             for password in passwords:
                 await asyncio.sleep(0.1)
-                if password == "sameer123":
+                if password == "sameer123":  # Mock correct password
                     console.print(f"\n[bold green]Password found: {password}[/bold green]")
                     found = True
                     break
@@ -185,10 +195,8 @@ async def start_attack(target, interface, wordlist):
             return
 
         console.print("\n[red]Password not found in the list.[/red]\n")
-
-        # Ask user if they want to try custom wordlist
-        menu = TerminalMenu(["Yes", "No"], title="Do you want to try a custom password list?")
-        choice = menu.show()
+        retry_menu = TerminalMenu(["Yes", "No"], title="Do you want to try a custom password list?")
+        choice = retry_menu.show()
 
         if choice == 0:
             wordlist = console.input("\nEnter full path to custom wordlist: ")
@@ -196,7 +204,7 @@ async def start_attack(target, interface, wordlist):
             console.print("\n[red]Then why did you select the built-in list? 🤔[/red]")
             return
 
-# === Main App ===
+# === Main app ===
 async def main():
     global selected_interface
     await print_banner()
