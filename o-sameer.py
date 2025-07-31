@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
-import os
+# === Auto install required Python packages ===
+import subprocess
 import sys
+
+required = ['scapy', 'rich', 'simple-term-menu']
+for package in required:
+    try:
+        __import__(package.replace('-', '_'))
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+# === Now import required modules ===
+import os
 import time
 import random
-import asynciohhhhhhh
+import asyncio
 import threading
 import signal
 import atexit
@@ -12,6 +23,7 @@ from simple_term_menu import TerminalMenu
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
 
+# === Banner ===
 BANNER = r"""
 :'#######::::::'######:::::'###::::'##::::'##:'########:'########:'########::
 '##.... ##::::'##... ##:::'## ##::: ###::'###: ##.....:: ##.....:: ##.... ##:
@@ -24,10 +36,9 @@ BANNER = r"""
 """
 
 console = Console()
-original_interface_mode = {}
 selected_interface = None
 
-# Cleanup handler for exit or Ctrl+C
+# === Cleanup ===
 def cleanup():
     if selected_interface:
         console.print(f"\n[cyan]Restoring {selected_interface} to managed mode...[/cyan]")
@@ -36,16 +47,22 @@ def cleanup():
         except Exception as e:
             console.print(f"[red]Failed to restore interface: {e}[/red]")
 
-# Register cleanup on exit
 atexit.register(cleanup)
 
-# Handle Ctrl+C
 def signal_handler(sig, frame):
-    console.print("\n[red]Script interrupted. Cleaning up...[/red]")
+    console.print("\n[red]Interrupted! Returning interface to normal mode.[/red]")
     sys.exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
+
+# === Network Setup ===
+def is_interface_up(interface):
+    try:
+        state = open(f"/sys/class/net/{interface}/operstate").read().strip()
+        return state == "up"
+    except:
+        return False
 
 def get_wifi_interfaces():
     output = os.popen("iw dev | grep Interface").read().splitlines()
@@ -53,13 +70,27 @@ def get_wifi_interfaces():
 
 def ensure_interface_up(interface):
     os.system(f"sudo ip link set {interface} up")
-    time.sleep(1)  # Important to avoid OSError: Network is down
+    for _ in range(10):
+        if is_interface_up(interface):
+            return True
+        time.sleep(0.5)
+    return False
 
 def set_monitor_mode(interface):
-    original_interface_mode[interface] = "managed"
+    console.print(f"[yellow]Switching {interface} to monitor mode...[/yellow]")
     os.system(f"sudo ip link set {interface} down")
     os.system(f"sudo iw dev {interface} set type monitor")
-    ensure_interface_up(interface)
+    if not ensure_interface_up(interface):
+        console.print(f"[red]Retrying monitor mode on {interface}...[/red]")
+        os.system(f"sudo ip link set {interface} down")
+        os.system(f"sudo iw dev {interface} set type managed")
+        os.system(f"sudo ip link set {interface} up")
+        time.sleep(1)
+        os.system(f"sudo ip link set {interface} down")
+        os.system(f"sudo iw dev {interface} set type monitor")
+        if not ensure_interface_up(interface):
+            console.print(f"[bold red]Monitor mode failed.[/bold red]")
+            sys.exit(1)
 
 def set_managed_mode(interface):
     os.system(f"sudo ip link set {interface} down")
@@ -80,6 +111,7 @@ def channel_hopper(interface, stop_event):
         os.system(f"iw dev {interface} set channel {channel}")
         time.sleep(0.5)
 
+# === Wi-Fi Scanner ===
 async def print_banner():
     console.clear()
     console.print(f"[cyan]{BANNER}[/cyan]")
@@ -102,10 +134,16 @@ async def async_scan_networks(interface, scan_time=15):
 
     try:
         sniff(iface=interface, prn=packet_handler, timeout=scan_time)
-    finally:
+    except OSError as e:
+        console.print(f"[red]Sniff failed: {e}[/red]")
         stop_event.set()
         hopper_thread.join()
         start_conflicting_services()
+        return []
+
+    stop_event.set()
+    hopper_thread.join()
+    start_conflicting_services()
 
     if not networks:
         console.print("[red]No networks found![/red]")
@@ -113,34 +151,35 @@ async def async_scan_networks(interface, scan_time=15):
 
     return [{"ssid": ssid, "bssid": bssid} for bssid, ssid in networks.items()]
 
+# === WPA Cracking Sim ===
 async def start_attack(target, interface, wordlist):
-    console.print(f"\n[bold green]Starting attack on:[/bold green] {target['ssid']} | {target['bssid']}")
+    console.print(f"\n[bold green]Attacking:[/bold green] {target['ssid']} | {target['bssid']}")
     console.print(f"[yellow]Using wordlist:[/yellow] {wordlist}")
 
-    console.print("\n[bold blue]Simulating WPA handshake capture...[/bold blue]")
+    console.print("\n[bold blue]Capturing handshake...[/bold blue]")
     await asyncio.sleep(3)
-
-    console.print("[bold green]Handshake captured![/bold green] Starting password cracking...\n")
+    console.print("[bold green]Handshake captured![/bold green] Cracking...\n")
 
     try:
         with open(wordlist, 'r') as f:
             passwords = f.read().splitlines()
     except FileNotFoundError:
-        console.print(f"[red]Wordlist file not found: {wordlist}[/red]")
+        console.print(f"[red]Wordlist not found: {wordlist}[/red]")
         return
 
     with Progress(SpinnerColumn(), BarColumn(), TextColumn("{task.description}")) as progress:
         task = progress.add_task("Cracking password...", total=len(passwords))
 
         for password in passwords:
-            await asyncio.sleep(0.1)  # Simulate cracking time
-            if password == "sameer123":  # Simulated correct password
+            await asyncio.sleep(0.1)
+            if password == "sameer123":  # fake correct pass
                 console.print(f"\n[bold green]Password found: {password}[/bold green]")
                 return
             progress.advance(task)
 
-    console.print("\n[red]Password not found in the list.[/red]")
+    console.print("\n[red]Password not found in list.[/red]")
 
+# === Main App ===
 async def main():
     global selected_interface
     await print_banner()
@@ -150,12 +189,10 @@ async def main():
         console.print("[red]No Wi-Fi interfaces found.[/red]")
         sys.exit(1)
 
-    terminal_menu = TerminalMenu(interfaces, title="Select your Wi-Fi interface:")
-    index = terminal_menu.show()
+    menu = TerminalMenu(interfaces, title="Select your Wi-Fi interface:")
+    index = menu.show()
     selected_interface = interfaces[index]
 
-    # Automatically switch to monitor mode
-    console.print(f"[yellow]Enabling monitor mode on {selected_interface}...[/yellow]")
     set_monitor_mode(selected_interface)
 
     try:
@@ -171,11 +208,7 @@ async def main():
         mode_menu = TerminalMenu(["Use built-in wordlist (bild.txt)", "Use custom wordlist"], title="Choose cracking mode")
         mode = mode_menu.show()
 
-        if mode == 0:
-            wordlist_path = "bild.txt"
-        else:
-            wordlist_path = console.input("\nEnter full path to custom wordlist: ")
-
+        wordlist_path = "bild.txt" if mode == 0 else console.input("\nEnter path to wordlist: ")
         await start_attack(target, selected_interface, wordlist_path)
 
     finally:
