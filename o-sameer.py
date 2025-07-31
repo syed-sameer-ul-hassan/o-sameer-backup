@@ -19,8 +19,14 @@ BANNER = r"""
 """
 
 console = Console()
+original_interface_mode = {}
+
+def get_wifi_interfaces():
+    output = os.popen("iw dev | grep Interface").read().splitlines()
+    return [line.strip().split()[-1] for line in output]
 
 def set_monitor_mode(interface):
+    original_interface_mode[interface] = "managed"
     os.system(f"sudo ip link set {interface} down")
     os.system(f"sudo iw dev {interface} set type monitor")
     os.system(f"sudo ip link set {interface} up")
@@ -33,22 +39,6 @@ def set_managed_mode(interface):
 async def print_banner():
     console.clear()
     console.print(f"[cyan]{BANNER}[/cyan]")
-
-async def detect_monitor_interfaces():
-    proc = await asyncio.create_subprocess_shell(
-        "iw dev",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
-    stdout, _ = await proc.communicate()
-    interfaces = []
-    current_iface = None
-    for line in stdout.decode().splitlines():
-        if "Interface" in line:
-            current_iface = line.strip().split()[-1]
-        if "type monitor" in line and current_iface:
-            interfaces.append(current_iface)
-    return interfaces
 
 async def async_scan_networks(interface, scan_time=15):
     console.print(f"Scanning Wi-Fi networks on: [bold]{interface}[/bold] for {scan_time} seconds...")
@@ -100,46 +90,48 @@ async def start_attack(target, interface, wordlist):
 async def main():
     await print_banner()
 
-    interfaces = await detect_monitor_interfaces()
+    interfaces = get_wifi_interfaces()
     if not interfaces:
-        console.print("[red]No monitor interfaces found. Please enable monitor mode first.[/red]")
+        console.print("[red]No Wi-Fi interfaces found.[/red]")
         sys.exit(1)
 
-    terminal_menu = TerminalMenu(interfaces, title="Select Wi-Fi interface:")
+    terminal_menu = TerminalMenu(interfaces, title="Select your Wi-Fi interface:")
     index = terminal_menu.show()
     interface = interfaces[index]
 
+    # Automatically switch to monitor mode
+    console.print(f"[yellow]Enabling monitor mode on {interface}...[/yellow]")
     set_monitor_mode(interface)
 
-    networks = await async_scan_networks(interface)
-    if not networks:
+    try:
+        networks = await async_scan_networks(interface)
+        if not networks:
+            return
+
+        choices = [f"{net['ssid']} | BSSID: {net['bssid']}" for net in networks]
+        terminal_menu = TerminalMenu(choices, title="Select target Wi-Fi network:")
+        idx = terminal_menu.show()
+        target = networks[idx]
+
+        mode_menu = TerminalMenu(["Use built-in wordlist (bild.txt)", "Use custom wordlist"], title="Choose cracking mode")
+        mode = mode_menu.show()
+
+        if mode == 0:
+            wordlist_path = "bild.txt"
+        else:
+            wordlist_path = console.input("\nEnter full path to custom wordlist: ")
+
+        await start_attack(target, interface, wordlist_path)
+
+    finally:
+        # Always return to managed mode
+        console.print(f"\n[cyan]Restoring interface {interface} to managed mode...[/cyan]")
         set_managed_mode(interface)
-        sys.exit(1)
-
-    choices = [f"{net['ssid']} | BSSID: {net['bssid']}" for net in networks]
-    terminal_menu = TerminalMenu(choices, title="Select target Wi-Fi network:")
-    idx = terminal_menu.show()
-    target = networks[idx]
-
-    mode_menu = TerminalMenu(["Use built-in wordlist (bild.txt)", "Use custom wordlist"], title="Choose cracking mode")
-    mode = mode_menu.show()
-
-    if mode == 0:
-        wordlist_path = "bild.txt"
-    else:
-        wordlist_path = console.input("\nEnter full path to custom wordlist: ")
-
-    await start_attack(target, interface, wordlist_path)
-
-    set_managed_mode(interface)
-    console.print("\n[cyan]Interface returned to managed mode.[/cyan]")
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        console.print("\n[red]Exiting...[/red]")
-        try:
-            set_managed_mode("wlan0")
-        except:
-            pass
+        console.print("\n[red]Interrupted. Restoring interface to managed mode...[/red]")
+        for iface in get_wifi_interfaces():
+            set_managed_mode(iface)
