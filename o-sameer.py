@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 import os
 import sys
+import time
+import random
 import asyncio
+import threading
 from scapy.all import *
 from simple_term_menu import TerminalMenu
 from rich.console import Console
@@ -36,22 +39,46 @@ def set_managed_mode(interface):
     os.system(f"sudo iw dev {interface} set type managed")
     os.system(f"sudo ip link set {interface} up")
 
+def stop_conflicting_services():
+    os.system("sudo systemctl stop NetworkManager")
+    os.system("sudo systemctl stop wpa_supplicant")
+
+def start_conflicting_services():
+    os.system("sudo systemctl start NetworkManager")
+    os.system("sudo systemctl start wpa_supplicant")
+
+def channel_hopper(interface, stop_event):
+    while not stop_event.is_set():
+        channel = random.randint(1, 13)
+        os.system(f"iw dev {interface} set channel {channel}")
+        time.sleep(0.5)
+
 async def print_banner():
     console.clear()
     console.print(f"[cyan]{BANNER}[/cyan]")
 
 async def async_scan_networks(interface, scan_time=15):
     console.print(f"Scanning Wi-Fi networks on: [bold]{interface}[/bold] for {scan_time} seconds...")
+    stop_conflicting_services()
+
     networks = {}
+    stop_event = threading.Event()
+    hopper_thread = threading.Thread(target=channel_hopper, args=(interface, stop_event))
+    hopper_thread.start()
 
     def packet_handler(pkt):
         if pkt.haslayer(Dot11Beacon) or pkt.haslayer(Dot11ProbeResp):
             ssid = pkt[Dot11Elt].info.decode(errors='ignore')
             bssid = pkt[Dot11].addr3
-            if ssid and bssid:
+            if ssid and bssid and bssid not in networks:
                 networks[bssid] = ssid
 
-    sniff(iface=interface, prn=packet_handler, timeout=scan_time)
+    try:
+        sniff(iface=interface, prn=packet_handler, timeout=scan_time)
+    finally:
+        stop_event.set()
+        hopper_thread.join()
+        start_conflicting_services()
 
     if not networks:
         console.print("[red]No networks found![/red]")
@@ -104,7 +131,7 @@ async def main():
     set_monitor_mode(interface)
 
     try:
-        networks = await async_scan_networks(interface)
+        networks = await async_scan_networks(interface, scan_time=20)
         if not networks:
             return
 
@@ -132,6 +159,6 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        console.print("\n[red]Interrupted. Restoring interface to managed mode...[/red]")
+        console.print("\n[red]Interrupted. Restoring interfaces...[/red]")
         for iface in get_wifi_interfaces():
             set_managed_mode(iface)
