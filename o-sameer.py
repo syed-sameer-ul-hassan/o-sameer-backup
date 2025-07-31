@@ -76,7 +76,18 @@ def ensure_interface_up(interface):
         time.sleep(0.5)
     return False
 
+def stop_conflicting_services():
+    console.print("[yellow]Stopping NetworkManager and wpa_supplicant...[/yellow]")
+    os.system("sudo systemctl stop NetworkManager")
+    os.system("sudo systemctl stop wpa_supplicant")
+
+def start_conflicting_services():
+    console.print("[yellow]Starting NetworkManager and wpa_supplicant...[/yellow]")
+    os.system("sudo systemctl start NetworkManager")
+    os.system("sudo systemctl start wpa_supplicant")
+
 def set_monitor_mode(interface):
+    stop_conflicting_services()
     console.print(f"[yellow]Switching {interface} to monitor mode...[/yellow]")
     os.system(f"sudo ip link set {interface} down")
     os.system(f"sudo iw dev {interface} set type monitor")
@@ -90,20 +101,14 @@ def set_monitor_mode(interface):
         os.system(f"sudo iw dev {interface} set type monitor")
         if not ensure_interface_up(interface):
             console.print(f"[bold red]Monitor mode failed.[/bold red]")
+            os.system("iw dev")
             sys.exit(1)
 
 def set_managed_mode(interface):
     os.system(f"sudo ip link set {interface} down")
     os.system(f"sudo iw dev {interface} set type managed")
     os.system(f"sudo ip link set {interface} up")
-
-def stop_conflicting_services():
-    os.system("sudo systemctl stop NetworkManager")
-    os.system("sudo systemctl stop wpa_supplicant")
-
-def start_conflicting_services():
-    os.system("sudo systemctl start NetworkManager")
-    os.system("sudo systemctl start wpa_supplicant")
+    start_conflicting_services()
 
 def channel_hopper(interface, stop_event):
     while not stop_event.is_set():
@@ -118,7 +123,6 @@ async def print_banner():
 
 async def async_scan_networks(interface, scan_time=15):
     console.print(f"Scanning Wi-Fi networks on: [bold]{interface}[/bold] for {scan_time} seconds...")
-    stop_conflicting_services()
 
     networks = {}
     stop_event = threading.Event()
@@ -138,12 +142,10 @@ async def async_scan_networks(interface, scan_time=15):
         console.print(f"[red]Sniff failed: {e}[/red]")
         stop_event.set()
         hopper_thread.join()
-        start_conflicting_services()
         return []
 
     stop_event.set()
     hopper_thread.join()
-    start_conflicting_services()
 
     if not networks:
         console.print("[red]No networks found![/red]")
@@ -151,33 +153,48 @@ async def async_scan_networks(interface, scan_time=15):
 
     return [{"ssid": ssid, "bssid": bssid} for bssid, ssid in networks.items()]
 
-# === WPA Cracking Sim ===
+# === WPA Cracking Sim with custom retry ===
 async def start_attack(target, interface, wordlist):
-    console.print(f"\n[bold green]Attacking:[/bold green] {target['ssid']} | {target['bssid']}")
-    console.print(f"[yellow]Using wordlist:[/yellow] {wordlist}")
+    while True:
+        console.print(f"\n[bold green]Attacking:[/bold green] {target['ssid']} | {target['bssid']}")
+        console.print(f"[yellow]Using wordlist:[/yellow] {wordlist}")
 
-    console.print("\n[bold blue]Capturing handshake...[/bold blue]")
-    await asyncio.sleep(3)
-    console.print("[bold green]Handshake captured![/bold green] Cracking...\n")
+        console.print("\n[bold blue]Capturing handshake...[/bold blue]")
+        await asyncio.sleep(3)
+        console.print("[bold green]Handshake captured![/bold green] Cracking...\n")
 
-    try:
-        with open(wordlist, 'r') as f:
-            passwords = f.read().splitlines()
-    except FileNotFoundError:
-        console.print(f"[red]Wordlist not found: {wordlist}[/red]")
-        return
+        try:
+            with open(wordlist, 'r') as f:
+                passwords = f.read().splitlines()
+        except FileNotFoundError:
+            console.print(f"[red]Wordlist not found: {wordlist}[/red]")
+            return
 
-    with Progress(SpinnerColumn(), BarColumn(), TextColumn("{task.description}")) as progress:
-        task = progress.add_task("Cracking password...", total=len(passwords))
+        found = False
+        with Progress(SpinnerColumn(), BarColumn(), TextColumn("{task.description}")) as progress:
+            task = progress.add_task("Cracking password...", total=len(passwords))
+            for password in passwords:
+                await asyncio.sleep(0.1)
+                if password == "sameer123":
+                    console.print(f"\n[bold green]Password found: {password}[/bold green]")
+                    found = True
+                    break
+                progress.advance(task)
 
-        for password in passwords:
-            await asyncio.sleep(0.1)
-            if password == "sameer123":  # fake correct pass
-                console.print(f"\n[bold green]Password found: {password}[/bold green]")
-                return
-            progress.advance(task)
+        if found:
+            return
 
-    console.print("\n[red]Password not found in list.[/red]")
+        console.print("\n[red]Password not found in the list.[/red]\n")
+
+        # Ask user if they want to try custom wordlist
+        menu = TerminalMenu(["Yes", "No"], title="Do you want to try a custom password list?")
+        choice = menu.show()
+
+        if choice == 0:
+            wordlist = console.input("\nEnter full path to custom wordlist: ")
+        else:
+            console.print("\n[red]Then why did you select the built-in list? 🤔[/red]")
+            return
 
 # === Main App ===
 async def main():
