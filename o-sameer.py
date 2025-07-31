@@ -51,11 +51,15 @@ def get_wifi_interfaces():
     output = os.popen("iw dev | grep Interface").read().splitlines()
     return [line.strip().split()[-1] for line in output]
 
+def ensure_interface_up(interface):
+    os.system(f"sudo ip link set {interface} up")
+    time.sleep(1)  # Important to avoid OSError: Network is down
+
 def set_monitor_mode(interface):
     original_interface_mode[interface] = "managed"
     os.system(f"sudo ip link set {interface} down")
     os.system(f"sudo iw dev {interface} set type monitor")
-    os.system(f"sudo ip link set {interface} up")
+    ensure_interface_up(interface)
 
 def set_managed_mode(interface):
     os.system(f"sudo ip link set {interface} down")
